@@ -1,3 +1,9 @@
+init-system-helpers (1.56~bpo9+1) stretch-backports; urgency=medium
+
+  * Rebuild for stretch-backports (Closes: #925524)
+
+ -- Michael Biebl <biebl@debian.org>  Sun, 31 Mar 2019 11:42:29 +0200
+
 init-system-helpers (1.56) unstable; urgency=medium
 
   * update-rc.d: If systemctl is available, use it in make_systemd_links.
