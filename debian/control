@@ -44,6 +44,7 @@ Section: metapackages
 Architecture: any
 Priority: important
 XB-Important: yes
+Protected: yes
 Multi-Arch: foreign
 Pre-Depends: systemd-sysv [linux-any] ${alt:sysvinit},
 Depends: ${misc:Depends},
