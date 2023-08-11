@@ -264,7 +264,7 @@ sub get_link_closure {
             for my $value (split(/\s+/, $1)) {
                 $value =~ s/^(["'])(.*)\g1$/$2/;
                 if ($value ne $unit_name) {
-                    push @links, { dest => $service_path, src => "/etc/systemd/$instance/$1" };
+                    push @links, { dest => $service_path, src => "/etc/systemd/$instance/$value" };
                 }
             }
         }
