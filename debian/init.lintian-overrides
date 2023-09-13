@@ -1,0 +1,2 @@
+# `Important: yes` instructs APT to warn the user before removing this package.
+init: unknown-field Important
