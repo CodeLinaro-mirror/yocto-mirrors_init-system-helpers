@@ -40,7 +40,7 @@ override_dh_gencontrol:
 
 override_dh_auto_test:
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
-ifeq (,$(filter $(DEB_HOST_ARCH),hurd-i386 ia64 kfreebsd-amd64 kfreebsd-i386 x32))
+ifeq (,$(filter $(DEB_HOST_ARCH),hurd-amd64 hurd-i386 ia64 kfreebsd-amd64 kfreebsd-i386 x32))
 	# test with fakechroot
 	set -eu; \
 	for test in t/*.t; do \

@@ -1,3 +1,9 @@
+init-system-helpers (1.65.3) UNRELEASED; urgency=medium
+
+  * Add hurd-amd64 case.
+
+ -- Samuel Thibault <sthibault@debian.org>  Sun, 12 Nov 2023 18:34:57 +0100
+
 init-system-helpers (1.65.2) unstable; urgency=low
 
   * Undo yet another hostile and baseless NMU.
