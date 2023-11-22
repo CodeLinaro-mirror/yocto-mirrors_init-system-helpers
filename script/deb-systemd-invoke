@@ -36,13 +36,14 @@ deb-systemd-invoke - wrapper around systemctl, respecting policy-rc.d
 =head1 SYNOPSIS
 
 B<deb-systemd-invoke> [B<--user>] start|stop|restart S<I<unit file> ...>
+B<deb-systemd-invoke> [B<--user>] daemon-reload|daemon-reexec
 
 =head1 DESCRIPTION
 
 B<deb-systemd-invoke> is a Debian-specific helper script which asks
 /usr/sbin/policy-rc.d before performing a systemctl call.
 
-B<deb-systemd-invoke> is intended to be used from maintscripts to start
+B<deb-systemd-invoke> is intended to be used from maintscripts to manage
 systemd unit files. It is specifically NOT intended to be used interactively by
 users. Instead, users should run systemd and use systemctl, or not bother about
 the systemd enabled state in case they are not running systemd.
@@ -54,7 +55,7 @@ use warnings;
 use Getopt::Long; # in core since Perl 5
 
 if (@ARGV < 2) {
-    print STDERR "Syntax: $0 <action> <unit file> [<unit file> ...]\n";
+    print STDERR "Syntax: $0 <action> [<unit file> [<unit file> ...]]\n";
     exit 1;
 }
 
@@ -152,6 +153,14 @@ if ($action eq "start" || $action eq "restart") {
     for my $instance (@instances) {
         chomp ($instance);
         system('systemctl', '--quiet', '--user', '--machine', "$instance@", $action, @units);
+    }
+    exit(0);
+} elsif (($action eq "daemon-reload" || $action eq "daemon-reexec") && !$is_system) {
+    my $global_exit_code = 0;
+
+    for my $instance (@instances) {
+        chomp ($instance);
+        system('systemctl', '--quiet', '--user', '--machine', "$instance@", $action);
     }
     exit(0);
 } else {
