@@ -36,7 +36,7 @@ deb-systemd-invoke - wrapper around systemctl, respecting policy-rc.d
 =head1 SYNOPSIS
 
 B<deb-systemd-invoke> [B<--user>] start|stop|restart S<I<unit file> ...>
-B<deb-systemd-invoke> [B<--user>] daemon-reload|daemon-reexec
+B<deb-systemd-invoke> [B<--user>] [B<--no-dbus>] daemon-reload|daemon-reexec
 
 =head1 DESCRIPTION
 
@@ -60,10 +60,12 @@ if (@ARGV < 2) {
 }
 
 my $is_system = 1;
+my $use_dbus = 1;
 my @instances = ();
 my $result = GetOptions(
     "user" => sub { $is_system = 0; },
     "system" => sub { $is_system = 1; }, # default
+    "no-dbus" => sub { $use_dbus = 0; },
 );
 
 my $policyhelper = '/usr/sbin/policy-rc.d';
@@ -155,13 +157,30 @@ if ($action eq "start" || $action eq "restart") {
         system('systemctl', '--quiet', '--user', '--machine', "$instance@", $action, @units);
     }
     exit(0);
-} elsif (($action eq "daemon-reload" || $action eq "daemon-reexec") && !$is_system) {
+} elsif (($action eq "daemon-reload" || $action eq "daemon-reexec") && !$is_system && $use_dbus) {
     my $global_exit_code = 0;
 
     for my $instance (@instances) {
         chomp ($instance);
         system('systemctl', '--quiet', '--user', '--machine', "$instance@", $action);
     }
+    exit(0);
+} elsif (($action eq "daemon-reload" || $action eq "daemon-reexec") && !$use_dbus) {
+    my $global_exit_code = 0;
+    my $signal;
+
+    if ($action eq "daemon-reload") {
+        $signal = 'SIGHUP';
+    } else {
+        $signal = 'SIGRTMIN+25';
+    }
+
+    if ($is_system) {
+        system('kill', '-s', $signal, '1');
+    } else {
+        system('systemctl', '--quiet', 'kill', '--kill-whom=main', '--signal', $signal, 'user@*.service');
+    }
+
     exit(0);
 } else {
     exec('systemctl', @ARGV);
