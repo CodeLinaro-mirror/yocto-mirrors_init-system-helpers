@@ -39,7 +39,6 @@ override_dh_gencontrol:
 	fi
 
 override_dh_auto_test:
-ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 ifeq (,$(filter $(DEB_HOST_ARCH),hurd-amd64 hurd-i386 ia64 kfreebsd-amd64 kfreebsd-i386 x32))
 	# test with fakechroot
 	set -eu; \
@@ -54,7 +53,6 @@ endif
 	    echo "======== $$(basename $$test) (DPKG_ROOT) ======="; \
 	    TEST_DPKG_ROOT=1 perl $$test; \
 	done
-endif
 
 %:
 	dh $@
