@@ -1,3 +1,17 @@
+init-system-helpers (1.67) unstable; urgency=medium
+
+  [ Mark Hindley ]
+  * Don't manually set status symlinks for native openrc-run scripts. For
+    native openrc-run scripts, fiddling with the links before the script
+    is run actually prevents it from running as openrc-run detects the
+    status has been changed and considers the script as already started.
+    (Closes: #1081994)
+
+  [ Luca Boccassi ]
+  * d/control: bump Standards-Version to 4.7.0, no changes
+
+ -- Luca Boccassi <bluca@debian.org>  Tue, 17 Sep 2024 17:07:33 +0200
+
 init-system-helpers (1.66) unstable; urgency=medium
 
   [ Samuel Thibault ]
