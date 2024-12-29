@@ -1,3 +1,11 @@
+init-system-helpers (1.68) unstable; urgency=medium
+
+  * Drop no longer needed dependency on usrmerge | usr-is-merged.
+    This was meant as a temporary measure to ensure that the transition to
+    the merged-/usr file system layout is done on upgrades to bookworm.
+
+ -- Michael Biebl <biebl@debian.org>  Sun, 29 Dec 2024 14:52:41 +0100
+
 init-system-helpers (1.67) unstable; urgency=medium
 
   [ Mark Hindley ]
