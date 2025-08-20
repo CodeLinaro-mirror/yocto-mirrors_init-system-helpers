@@ -12,7 +12,7 @@ Build-Depends: debhelper-compat (= 13),
                libtest-deep-perl <!nocheck>,
                perl:any,
                python3-docutils <!nodoc>,
-Standards-Version: 4.7.0
+Standards-Version: 4.7.2
 Rules-Requires-Root: no
 Vcs-Git: https://salsa.debian.org/debian/init-system-helpers.git
 Vcs-Browser: https://salsa.debian.org/debian/init-system-helpers
