@@ -54,7 +54,7 @@ use strict;
 use warnings;
 use Getopt::Long; # in core since Perl 5
 
-if (@ARGV < 2) {
+if (@ARGV < 1) {
     print STDERR "Syntax: $0 <action> [<unit file> [<unit file> ...]]\n";
     exit 1;
 }
