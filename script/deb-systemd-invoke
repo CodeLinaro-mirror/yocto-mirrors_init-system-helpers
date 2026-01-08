@@ -176,6 +176,10 @@ sub reload_reexec_signal {
 sub do_reload_reexec {
     my ($action) = @_;
 
+    if (length $ENV{DPKG_ROOT}) {
+        return;
+    }
+
     if ($use_dbus) {
         reload_reexec_dbus($action);
     } else {
