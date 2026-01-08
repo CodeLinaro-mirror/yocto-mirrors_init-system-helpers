@@ -35,8 +35,8 @@ deb-systemd-invoke - wrapper around systemctl, respecting policy-rc.d
 
 =head1 SYNOPSIS
 
-B<deb-systemd-invoke> [B<--user>] start|stop|restart S<I<unit file> ...>
-B<deb-systemd-invoke> [B<--user>] [B<--no-dbus>] daemon-reload|daemon-reexec
+B<deb-systemd-invoke> [B<--user>] [B<--[no-]deferred>] start|stop|restart|try-restart|reload S<I<unit file> ...>
+B<deb-systemd-invoke> [B<--user>] [B<--no-dbus>] daemon-reload|daemon-reexec|enqueue-marked-jobs
 
 =head1 DESCRIPTION
 
@@ -47,6 +47,12 @@ B<deb-systemd-invoke> is intended to be used from maintscripts to manage
 systemd unit files. It is specifically NOT intended to be used interactively by
 users. Instead, users should run systemd and use systemctl, or not bother about
 the systemd enabled state in case they are not running systemd.
+
+When B<--deferred> is used, the requested actions will be enqueued, and
+a separate B<enqueue-marked-jobs> action will be required to execute them.
+Note that this will automatically fallback to immediate execution in case the
+running systemd version is too old to support the required APIs, in which case
+B<enqueue-marked-jobs> will be a no-op.
 
 =cut
 
@@ -62,31 +68,27 @@ if (@ARGV < 1) {
 
 my $is_system = 1;
 my $use_dbus = 1;
+my $deferred = 0;
 my $result = GetOptions(
     "user" => sub { $is_system = 0; },
     "system" => sub { $is_system = 1; }, # default
     "no-dbus" => sub { $use_dbus = 0; },
+    "deferred" => sub { $deferred = 1; },
+    "no-deferred" => sub { $deferred = 0; },
 );
 
 # Varlink methods are very new, so check if the sockets and the methods are available
 # to allow graceful fallbacks to older IPCs. Returns 0 when the calls could be made,
 # -1 otherwise. This implementation must only use core Perl, and no external programs,
 # to be self-contained and safe against apt ordering bugs.
-sub varlink_method_invoke {
-    my ($qualified_method, $parameters) = @_;
+sub varlink_get_sockets {
     my @sockets = ();
-
-    # Split qualified method into interface and method name (e.g., "io.systemd.Manager.Reload" -> "io.systemd.Manager" and "Reload")
-    my ($interface, $method) = $qualified_method =~ /^(.+)\.([^.]+)$/;
-    if (!defined $interface || !defined $method) {
-        die("Invalid qualified method: $qualified_method");
-    }
 
     if ($is_system) {
         push @sockets, '/run/systemd/io.systemd.Manager';
     } else {
         # For each <UID> directory under /run/user/ check if the systemd/io.systemd.Manager socket exists
-        opendir(my $dh, '/run/user/') || return;
+        opendir(my $dh, '/run/user/') || return ();
         while (my $entry = readdir($dh)) {
             next if ($entry =~ /^\./); # skip . and ..
             my $socket_path = "/run/user/$entry/systemd/io.systemd.Manager";
@@ -96,37 +98,110 @@ sub varlink_method_invoke {
         }
         closedir($dh);
     }
-    return -1 if (! @sockets);
+
+    return @sockets;
+}
+
+sub varlink_connect {
+    my ($socket) = @_;
+
+    my $client = IO::Socket::UNIX->new(Type => SOCK_STREAM(), Peer => $socket, Timeout => 30);
+    return undef if (!defined $client);
+    $client->setsockopt(SOL_SOCKET, SO_RCVTIMEO, pack('l!l!', 30, 0)) or die "Failed to set socket receive timeout: $!";
+    $client->setsockopt(SOL_SOCKET, SO_SNDTIMEO, pack('l!l!', 30, 0)) or die "Failed to set socket send timeout: $!";
+
+    return $client;
+}
+
+sub varlink_send_and_receive {
+    my ($client, $method, $parameters) = @_;
+
+    print $client "{\"method\":\"$method\",\"parameters\":$parameters}\0";
+    local $/ = "\0"; # set input record separator to null byte as per varlink protocol
+    my $response = <$client>;
+
+    return $response;
+}
+
+sub varlink_interface_has_method {
+    my ($socket, $interface, $method) = @_;
+
+    my $client = varlink_connect($socket);
+    return 0 if (!defined $client);
+
+    my $response = varlink_send_and_receive($client, 'org.varlink.service.GetInterfaceDescription', "{\"interface\":\"$interface\"}");
+    close($client);
+
+    return 0 if (!defined $response || $response !~ /method\s+$method\s*\(/);
+    return 1;
+}
+
+sub varlink_method_invoke {
+    my ($qualified_method, $parameters) = @_;
+
+    # Split qualified method into interface and method name (e.g., "io.systemd.Manager.Reload" -> "io.systemd.Manager" and "Reload")
+    my ($interface, $method) = $qualified_method =~ /^(.+)\.([^.]+)$/;
+    if (!defined $interface || !defined $method) {
+        die("Invalid qualified method: $qualified_method");
+    }
+
+    my @sockets = varlink_get_sockets();
+    return -1 if (!@sockets);
 
     # First check to see if the interface supports the method
-    my $introspection_client = IO::Socket::UNIX->new(Type => SOCK_STREAM(), Peer => $sockets[0], Timeout => 30);
-    return -1 if (! defined $introspection_client);
-    $introspection_client->setsockopt(SOL_SOCKET, SO_RCVTIMEO, pack('l!l!', 30, 0)) or die "Failed to set socket receive timeout: $!";
-    $introspection_client->setsockopt(SOL_SOCKET, SO_SNDTIMEO, pack('l!l!', 30, 0)) or die "Failed to set socket send timeout: $!";
-
-    print $introspection_client "{\"method\":\"org.varlink.service.GetInterfaceDescription\",\"parameters\":{\"interface\":\"$interface\"}}\0";
-    local $/ = "\0"; # set input record separator to null byte as per varlink protocol
-    my $response = <$introspection_client>;
-    close($introspection_client);
-    return -1 if ($response !~ /method\s+$method\s*\(/);
+    return -1 if (!varlink_interface_has_method($sockets[0], $interface, $method));
 
     for my $socket (@sockets) {
-        my $client = IO::Socket::UNIX->new(Type => SOCK_STREAM(), Peer => $socket, Timeout => 30);
-        return -1 if (! defined $client);
-        $client->setsockopt(SOL_SOCKET, SO_RCVTIMEO, pack('l!l!', 30, 0)) or die "Failed to set socket receive timeout: $!";
-        $client->setsockopt(SOL_SOCKET, SO_SNDTIMEO, pack('l!l!', 30, 0)) or die "Failed to set socket send timeout: $!";
+        my $client = varlink_connect($socket);
+        return -1 if (!defined $client);
 
-        print $client "{\"method\":\"$qualified_method\",\"parameters\":$parameters}\0";
-        local $/ = "\0"; # set input record separator to null byte as per varlink protocol
-        # wait for a reply, so that Reloads are synchronous
-        my $response = <$client>;
+        my $response = varlink_send_and_receive($client, $qualified_method, $parameters);
         close($client);
 
         # Reexecute causes the socket to be closed with no response on reexec
-        return -1 if ((! defined $response && $method ne "Reexecute") || (defined $response && $response =~ /"error"\s*:/));
+        return -1 if ((!defined $response && $method ne "Reexecute") || (defined $response && $response =~ /"error"\s*:/));
     }
 
     return 0;
+}
+
+sub action_to_marker {
+    my ($action) = @_;
+
+    if ($action eq "start") {
+        return '+needs-start';
+    } elsif ($action eq "restart") {
+        return '+needs-restart';
+    } elsif ($action eq "try-restart") {
+        return '+needs-restart';
+    } elsif ($action eq "stop") {
+        return '+needs-stop';
+    } elsif ($action eq "reload") {
+        return '+needs-reload';
+    } else {
+        die("Invalid action for deferred start/restart/try-restart/stop/reload: $action");
+    }
+}
+
+# Returns the effective action for a unit, or undef if the unit should be skipped.
+# If the unit is not active and restart is requested, returns 'start' instead.
+sub get_effective_action {
+    my ($unit, $unit_installed, $unit_active, $action) = @_;
+
+    if (!$unit_installed && $action eq "start") {
+        print STDERR "$unit is a disabled or a static unit, not starting it.\n";
+        return undef;
+    } elsif (!$unit_installed && !$unit_active && ($action eq "restart" || $action eq "try-restart" || $action eq "reload")) {
+        print STDERR "$unit is a disabled or a static unit not running, skipping $action.\n";
+        return undef;
+    } elsif (!$unit_active && $action eq "try-restart") {
+        return undef;
+    } elsif (!$unit_active && $action eq "restart") {
+        # unit is not active, change action to 'start', as 'restart' will be a no-op
+        return "start";
+    } else {
+        return $action;
+    }
 }
 
 sub get_instances {
@@ -152,14 +227,14 @@ sub get_instances {
     return @instances;
 }
 
-sub do_start_restart {
+sub start_restart_stop_dbus {
     my ($action, @units) = @_;
     my @instances = get_instances();
     return if (!@instances);
 
     for my $instance (@instances) {
         my @instance_args = ();
-        my @start_units = ();
+        my @start_unit_markers = ();
 
         if ($instance eq 'system') {
             push @instance_args, '--system';
@@ -177,29 +252,100 @@ sub do_start_restart {
             }
             system('systemctl', @instance_args, '--quiet', 'is-active', '--', $unit);
             my $unit_active = $?>>8 == 0 ? 1 : 0;
-            if (!$unit_installed && $action eq "start") {
-                print STDERR "$unit is a disabled or a static unit, not starting it.\n";
-            } elsif (!$unit_installed && !$unit_active && $action eq "restart") {
-                print STDERR "$unit is a disabled or a static unit not running, not starting it.\n";
-            }
-            else {
-                push @start_units, $unit;
+            my $effective_action = get_effective_action($unit, $unit_installed, $unit_active, $action);
+            if (defined $effective_action) {
+                push @start_unit_markers, [$unit, $effective_action];
             }
         }
-        if (@start_units) {
-            system('systemctl', '--quiet', @instance_args, $action, @start_units) == 0 or die("Could not execute systemctl: $?");
+        if (@start_unit_markers) {
+            if (! $deferred) {
+                # Group units by action for non-deferred execution
+                my %units_by_action;
+                for my $unit_marker (@start_unit_markers) {
+                    my ($unit, $unit_action) = @$unit_marker;
+                    push @{$units_by_action{$unit_action}}, $unit;
+                }
+                for my $unit_action (keys %units_by_action) {
+                    system('systemctl', '--quiet', @instance_args, $unit_action, @{$units_by_action{$unit_action}}) == 0 or die("Could not execute systemctl: $?");
+                }
+            } else {
+                for my $unit_marker (@start_unit_markers) {
+                    my ($unit, $unit_action) = @$unit_marker;
+                    my $marker = action_to_marker($unit_action);
+                    # Quietly fallback to immediate execution if the above failed (e.g., because the systemd version is too old)
+                    if (system('systemctl', '--quiet', @instance_args, 'set-property', $unit, "Markers=$marker") != 0) {
+                        system('systemctl', '--quiet', @instance_args, $unit_action, $unit) == 0 or die("Could not execute systemctl: $?");
+                    }
+                }
+            }
         }
     }
 }
 
-sub do_stop_user {
+sub start_restart_stop_varlink {
     my ($action, @units) = @_;
-    my @instances = get_instances();
-    return if (!@instances);
 
-    for my $instance (@instances) {
-        chomp ($instance);
-        system('systemctl', '--quiet', '--user', '--machine', "$instance@", $action, @units);
+    if (!$deferred) {
+        return -1;
+    }
+
+    my @sockets = varlink_get_sockets();
+    return -1 if (!@sockets);
+
+    # First check to see if the interface supports the method
+    return -1 if (!varlink_interface_has_method($sockets[0], 'io.systemd.Unit', 'SetProperties'));
+
+    for my $socket (@sockets) {
+        my $client = varlink_connect($socket);
+        return -1 if (!defined $client);
+
+        my @start_unit_markers = ();
+
+        for my $unit (@units) {
+            my $response = varlink_send_and_receive($client, 'io.systemd.Unit.List', "{\"name\":\"$unit\"}");
+            if (!defined $response || $response =~ /"error"\s*:/) {
+                close($client);
+                return -1;
+            }
+
+            my $unit_installed = 0;
+            # matching enabled and enabled-runtime as an installed non static unit
+            if ($response =~ /"UnitFileState"\s*:\s*"enabled/) {
+                $unit_installed = 1;
+            }
+            my $unit_active = 0;
+            if ($response =~ /"ActiveState"\s*:\s*"active"/) {
+                $unit_active = 1;
+            }
+            my $effective_action = get_effective_action($unit, $unit_installed, $unit_active, $action);
+            if (defined $effective_action) {
+                push @start_unit_markers, [$unit, action_to_marker($effective_action)];
+            }
+        }
+        for my $unit_marker (@start_unit_markers) {
+            my ($unit, $marker) = @$unit_marker;
+            my $response = varlink_send_and_receive($client, 'io.systemd.Unit.SetProperties', "{\"runtime\": true, \"name\": \"$unit\", \"properties\": {\"Markers\": [\"$marker\"]}}");
+            if (!defined $response || $response =~ /"error"\s*:/) {
+                close($client);
+                return -1;
+            }
+        }
+
+        close($client);
+    }
+
+    system('dpkg-trigger', 'systemd-enqueue-marked-jobs') == 0 or print STDERR "could not trigger systemd-enqueue-marked-jobs dpkg trigger, units will not be acted upon\n";
+
+    return 0;
+}
+
+sub do_start_restart_stop {
+    my ($action, @units) = @_;
+
+    if (start_restart_stop_varlink($action, @units) == 0) {
+        return;
+    } else {
+        start_restart_stop_dbus($action, @units);
     }
 }
 
@@ -265,6 +411,36 @@ sub do_reload_reexec {
     }
 }
 
+sub do_enqueue_marked_jobs {
+    my ($action) = @_;
+
+    if ($action ne "enqueue-marked-jobs") {
+        die("Invalid action for enqueue-marked-jobs: $action");
+    }
+
+    if (length $ENV{DPKG_ROOT}) {
+        return;
+    }
+
+    # Prefer varlink, as it can be used with no external dependencies
+    # and it's thus safe against apt ordering bugs
+    if (varlink_method_invoke('io.systemd.Manager.EnqueueMarkedJobs', '{}') == 0) {
+        return;
+    } else {
+        my @instances = get_instances();
+        return if (!@instances);
+
+        for my $instance (@instances) {
+            chomp ($instance);
+            if ($instance eq 'system') {
+                system('systemctl', '--quiet', '--system', "reload-or-restart", "--marked");
+            } else {
+                system('systemctl', '--quiet', '--user', '--machine', "$instance@", "reload-or-restart", "--marked");
+            }
+        }
+    }
+}
+
 my $policyhelper = '/usr/sbin/policy-rc.d';
 if (length $ENV{DPKG_ROOT}) {
     $policyhelper = $ENV{DPKG_ROOT} . $policyhelper;
@@ -292,12 +468,12 @@ if (-x $policyhelper) {
 # However, if the job is disabled but has been forced into the running state, we *do* stop
 # and restart it since this is expected behaviour for the admin who forced the start.
 # We don't autostart static units either.
-if ($action eq "start" || $action eq "restart") {
-    do_start_restart($action, @units);
-} elsif ($action eq "stop" && !$is_system) {
-    do_stop_user($action, @units);
+if ($action eq "start" || $action eq "restart" || $action eq "try-restart" || $action eq "stop" || $action eq "reload") {
+    do_start_restart_stop($action, @units);
 } elsif (($action eq "daemon-reload" || $action eq "daemon-reexec")) {
     do_reload_reexec($action);
+} elsif ($action eq "enqueue-marked-jobs") {
+    do_enqueue_marked_jobs($action);
 } else {
     exec('systemctl', @ARGV);
 }
