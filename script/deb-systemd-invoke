@@ -61,63 +61,43 @@ if (@ARGV < 2) {
 
 my $is_system = 1;
 my $use_dbus = 1;
-my @instances = ();
 my $result = GetOptions(
     "user" => sub { $is_system = 0; },
     "system" => sub { $is_system = 1; }, # default
     "no-dbus" => sub { $use_dbus = 0; },
 );
 
-my $policyhelper = '/usr/sbin/policy-rc.d';
-if (length $ENV{DPKG_ROOT}) {
-    $policyhelper = $ENV{DPKG_ROOT} . $policyhelper;
-}
-my @units = @ARGV;
-my $action = shift @units;
-if (-x $policyhelper) {
-    for my $unit (@units) {
-        system(qq|$policyhelper $unit "$action"|);
+sub get_instances {
+    my @instances = ();
 
-        # 0 or 104 means run
-        # 101 means do not run
-        my $exitcode = ($? >> 8);
-        if ($exitcode == 101) {
-            print STDERR "$policyhelper returned 101, not running '" . join(' ', @ARGV) . "'\n";
-            exit 0;
-        } elsif ($exitcode != 104 && $exitcode != 0) {
-            print STDERR "deb-systemd-invoke only supports $policyhelper return codes 0, 101, and 104!\n";
-            print STDERR "Got return code $exitcode, ignoring.\n";
-        }
-    }
-}
-
-if (!$is_system) {
-    # '--machine <ID>@' was added in v250 and v249.10, before that we can't talk to arbitrary user instances
-    my $systemctl_version = `systemctl --version --quiet | sed -n -r "s/systemd ([0-9]+) \\(.*/\\1/p"`;
-    chomp ($systemctl_version);
-    if (system('dpkg', '--compare-versions', $systemctl_version, 'ge', '249') != 0) {
+    if (!$is_system) {
+        # '--machine <ID>@' was added in v250 and v249.10, before that we can't talk to arbitrary user instances
+        my $systemctl_version = `systemctl --version --quiet | sed -n -r "s/systemd ([0-9]+) \\(.*/\\1/p"`;
+        chomp ($systemctl_version);
+        if (system('dpkg', '--compare-versions', $systemctl_version, 'ge', '249') != 0) {
             print STDERR "systemctl version $systemctl_version does not support acting on user instance, skipping\n";
-            exit 0;
+            return ();
+        }
+
+        # Each user instance of the manager has a corresponding user@<id>.service unit.
+        # Get the full list of IDs, so that we can talk to each user instance to start/stop
+        # user units.
+        @instances = `systemctl --no-legend --quiet list-units 'user@*' | sed -n -r 's/.*user@([0-9]+).service.*/\\1/p'`;
+    } else {
+        push @instances, 'system';
     }
 
-    # Each user instance of the manager has a corresponding user@<id<.service unit.
-    # Get the full list of IDs, so that we can talk to each user instance to start/stop
-    # user units.
-    @instances = `systemctl --no-legend --quiet list-units 'user@*' | sed -n -r 's/.*user@([0-9]+).service.*/\\1/p'`;
-} else {
-    push @instances, 'system';
+    return @instances;
 }
 
-# If the job is disabled and is not currently running, the job is not started or restarted.
-# However, if the job is disabled but has been forced into the running state, we *do* stop
-# and restart it since this is expected behaviour for the admin who forced the start.
-# We don't autostart static units either.
-if ($action eq "start" || $action eq "restart") {
-    my $global_exit_code = 0;
-    my @start_units = ();
+sub do_start_restart {
+    my ($action, @units) = @_;
+    my @instances = get_instances();
+    return if (!@instances);
 
     for my $instance (@instances) {
         my @instance_args = ();
+        my @start_units = ();
 
         if ($instance eq 'system') {
             push @instance_args, '--system';
@@ -148,25 +128,36 @@ if ($action eq "start" || $action eq "restart") {
             system('systemctl', '--quiet', @instance_args, $action, @start_units) == 0 or die("Could not execute systemctl: $?");
         }
     }
-    exit(0);
-} elsif ($action eq "stop" && !$is_system) {
-    my $global_exit_code = 0;
+}
+
+sub do_stop_user {
+    my ($action, @units) = @_;
+    my @instances = get_instances();
+    return if (!@instances);
 
     for my $instance (@instances) {
         chomp ($instance);
         system('systemctl', '--quiet', '--user', '--machine', "$instance@", $action, @units);
     }
-    exit(0);
-} elsif (($action eq "daemon-reload" || $action eq "daemon-reexec") && !$is_system && $use_dbus) {
-    my $global_exit_code = 0;
+}
+
+sub reload_reexec_dbus {
+    my ($action) = @_;
+    my @instances = get_instances();
+    return if (!@instances);
 
     for my $instance (@instances) {
         chomp ($instance);
-        system('systemctl', '--quiet', '--user', '--machine', "$instance@", $action);
+        if ($instance eq 'system') {
+            system('systemctl', '--quiet', '--system', $action);
+        } else {
+            system('systemctl', '--quiet', '--user', '--machine', "$instance@", $action);
+        }
     }
-    exit(0);
-} elsif (($action eq "daemon-reload" || $action eq "daemon-reexec") && !$use_dbus) {
-    my $global_exit_code = 0;
+}
+
+sub reload_reexec_signal {
+    my ($action) = @_;
     my $signal;
 
     if ($action eq "daemon-reload") {
@@ -180,8 +171,51 @@ if ($action eq "start" || $action eq "restart") {
     } else {
         system('systemctl', '--quiet', 'kill', '--kill-whom=main', '--signal', $signal, 'user@*.service');
     }
+}
 
-    exit(0);
+sub do_reload_reexec {
+    my ($action) = @_;
+
+    if ($use_dbus) {
+        reload_reexec_dbus($action);
+    } else {
+        reload_reexec_signal($action);
+    }
+}
+
+my $policyhelper = '/usr/sbin/policy-rc.d';
+if (length $ENV{DPKG_ROOT}) {
+    $policyhelper = $ENV{DPKG_ROOT} . $policyhelper;
+}
+my @units = @ARGV;
+my $action = shift @units;
+if (-x $policyhelper) {
+    for my $unit (@units) {
+        system(qq|$policyhelper $unit "$action"|);
+
+        # 0 or 104 means run
+        # 101 means do not run
+        my $exitcode = ($? >> 8);
+        if ($exitcode == 101) {
+            print STDERR "$policyhelper returned 101, not running '" . join(' ', @ARGV) . "'\n";
+            exit 0;
+        } elsif ($exitcode != 104 && $exitcode != 0) {
+            print STDERR "deb-systemd-invoke only supports $policyhelper return codes 0, 101, and 104!\n";
+            print STDERR "Got return code $exitcode, ignoring.\n";
+        }
+    }
+}
+
+# If the job is disabled and is not currently running, the job is not started or restarted.
+# However, if the job is disabled but has been forced into the running state, we *do* stop
+# and restart it since this is expected behaviour for the admin who forced the start.
+# We don't autostart static units either.
+if ($action eq "start" || $action eq "restart") {
+    do_start_restart($action, @units);
+} elsif ($action eq "stop" && !$is_system) {
+    do_stop_user($action, @units);
+} elsif (($action eq "daemon-reload" || $action eq "daemon-reexec")) {
+    do_reload_reexec($action);
 } else {
     exec('systemctl', @ARGV);
 }
