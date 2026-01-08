@@ -53,6 +53,7 @@ the systemd enabled state in case they are not running systemd.
 use strict;
 use warnings;
 use Getopt::Long; # in core since Perl 5
+use IO::Socket::UNIX; # in core since at least Perl 5.6.1-8.9
 
 if (@ARGV < 1) {
     print STDERR "Syntax: $0 <action> [<unit file> [<unit file> ...]]\n";
@@ -66,6 +67,67 @@ my $result = GetOptions(
     "system" => sub { $is_system = 1; }, # default
     "no-dbus" => sub { $use_dbus = 0; },
 );
+
+# Varlink methods are very new, so check if the sockets and the methods are available
+# to allow graceful fallbacks to older IPCs. Returns 0 when the calls could be made,
+# -1 otherwise. This implementation must only use core Perl, and no external programs,
+# to be self-contained and safe against apt ordering bugs.
+sub varlink_method_invoke {
+    my ($qualified_method, $parameters) = @_;
+    my @sockets = ();
+
+    # Split qualified method into interface and method name (e.g., "io.systemd.Manager.Reload" -> "io.systemd.Manager" and "Reload")
+    my ($interface, $method) = $qualified_method =~ /^(.+)\.([^.]+)$/;
+    if (!defined $interface || !defined $method) {
+        die("Invalid qualified method: $qualified_method");
+    }
+
+    if ($is_system) {
+        push @sockets, '/run/systemd/io.systemd.Manager';
+    } else {
+        # For each <UID> directory under /run/user/ check if the systemd/io.systemd.Manager socket exists
+        opendir(my $dh, '/run/user/') || return;
+        while (my $entry = readdir($dh)) {
+            next if ($entry =~ /^\./); # skip . and ..
+            my $socket_path = "/run/user/$entry/systemd/io.systemd.Manager";
+            if (-S $socket_path) {
+                push @sockets, $socket_path;
+            }
+        }
+        closedir($dh);
+    }
+    return -1 if (! @sockets);
+
+    # First check to see if the interface supports the method
+    my $introspection_client = IO::Socket::UNIX->new(Type => SOCK_STREAM(), Peer => $sockets[0], Timeout => 30);
+    return -1 if (! defined $introspection_client);
+    $introspection_client->setsockopt(SOL_SOCKET, SO_RCVTIMEO, pack('l!l!', 30, 0)) or die "Failed to set socket receive timeout: $!";
+    $introspection_client->setsockopt(SOL_SOCKET, SO_SNDTIMEO, pack('l!l!', 30, 0)) or die "Failed to set socket send timeout: $!";
+
+    print $introspection_client "{\"method\":\"org.varlink.service.GetInterfaceDescription\",\"parameters\":{\"interface\":\"$interface\"}}\0";
+    local $/ = "\0"; # set input record separator to null byte as per varlink protocol
+    my $response = <$introspection_client>;
+    close($introspection_client);
+    return -1 if ($response !~ /method\s+$method\s*\(/);
+
+    for my $socket (@sockets) {
+        my $client = IO::Socket::UNIX->new(Type => SOCK_STREAM(), Peer => $socket, Timeout => 30);
+        return -1 if (! defined $client);
+        $client->setsockopt(SOL_SOCKET, SO_RCVTIMEO, pack('l!l!', 30, 0)) or die "Failed to set socket receive timeout: $!";
+        $client->setsockopt(SOL_SOCKET, SO_SNDTIMEO, pack('l!l!', 30, 0)) or die "Failed to set socket send timeout: $!";
+
+        print $client "{\"method\":\"$qualified_method\",\"parameters\":$parameters}\0";
+        local $/ = "\0"; # set input record separator to null byte as per varlink protocol
+        # wait for a reply, so that Reloads are synchronous
+        my $response = <$client>;
+        close($client);
+
+        # Reexecute causes the socket to be closed with no response on reexec
+        return -1 if ((! defined $response && $method ne "Reexecute") || (defined $response && $response =~ /"error"\s*:/));
+    }
+
+    return 0;
+}
 
 sub get_instances {
     my @instances = ();
@@ -173,6 +235,18 @@ sub reload_reexec_signal {
     }
 }
 
+sub reload_reexec_varlink {
+    my ($action) = @_;
+
+    if ($action eq "daemon-reload") {
+        return varlink_method_invoke('io.systemd.Manager.Reload', '{}');
+    } elsif ($action eq "daemon-reexec") {
+        return varlink_method_invoke('io.systemd.Manager.Reexecute', '{}');
+    } else {
+        die("Invalid action for varlink reload/reexec: $action");
+    }
+}
+
 sub do_reload_reexec {
     my ($action) = @_;
 
@@ -180,7 +254,11 @@ sub do_reload_reexec {
         return;
     }
 
-    if ($use_dbus) {
+    # Prefer varlink, as it can be used with no external dependencies
+    # and it's thus safe against apt ordering bugs
+    if (reload_reexec_varlink($action) == 0) {
+        return;
+    } elsif ($use_dbus) {
         reload_reexec_dbus($action);
     } else {
         reload_reexec_signal($action);
