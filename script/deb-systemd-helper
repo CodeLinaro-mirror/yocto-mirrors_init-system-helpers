@@ -329,7 +329,7 @@ sub enable {
                    $instance eq "user" ? "--global" : "--system",
                    "--preset-mode=enable-only",
                    "preset", $scriptname) == 0
-                or error("systemctl preset failed on $scriptname: $!");
+                or error("systemctl preset failed on $scriptname: $?");
         }
         make_systemd_links($scriptname, $service_path, create_links => $create_links);
     } else {

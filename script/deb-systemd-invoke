@@ -145,7 +145,7 @@ if ($action eq "start" || $action eq "restart") {
             }
         }
         if (@start_units) {
-            system('systemctl', '--quiet', @instance_args, $action, @start_units) == 0 or die("Could not execute systemctl: $!");
+            system('systemctl', '--quiet', @instance_args, $action, @start_units) == 0 or die("Could not execute systemctl: $?");
         }
     }
     exit(0);
