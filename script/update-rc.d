@@ -192,6 +192,10 @@ sub create_sequence {
     $insserv = "/sbin/insserv" if ( -x "$dpkg_root/sbin/insserv");
     # If insserv is not configured it is not fully installed
     my $insserv_installed = -x "$dpkg_root$insserv" && -e "$dpkg_root/etc/insserv.conf";
+    # Ignore the presence of insserv if this system is using systemd as init
+    if ($insserv_installed && readlink "$dpkg_root/usr/sbin/init" eq "../lib/systemd/systemd") {
+        $insserv_installed = 0;
+    }
     my @opts;
     push(@opts, '-f') if $force;
     # Add force flag if initscripts is not installed
