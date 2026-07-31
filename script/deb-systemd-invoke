@@ -239,6 +239,8 @@ sub start_restart_stop_dbus {
                 $unit_installed = 1;
             }
             system('systemctl', @instance_args, '--quiet', 'is-active', '--', $unit);
+            die "Could not execute systemctl: $!\n" if $? == -1;
+            die "systemctl died with signal " . ($? & 127) . "!\n" if $? & 127;
             my $unit_active = $?>>8 == 0 ? 1 : 0;
             my $effective_action = get_effective_action($unit, $unit_installed, $unit_active, $action);
             if (defined $effective_action) {
@@ -255,7 +257,10 @@ sub start_restart_stop_dbus {
                     push(@{$units_by_action{$unit_action}}, $unit);
                 }
                 foreach my $unit_action (keys %units_by_action) {
-                    system('systemctl', '--quiet', @instance_args, $unit_action, @{$units_by_action{$unit_action}}) == 0 or die("Could not execute systemctl: $?");
+                    system('systemctl', '--quiet', @instance_args, $unit_action, @{$units_by_action{$unit_action}});
+                    die "Could not execute systemctl: $!\n" if $? == -1;
+                    die "systemctl died with signal " . ($? & 127) . "!\n" if $? & 127;
+                    die "systemctl returned status " . ($? >> 8) . "!\n" if $? >> 8;
                 }
             } else {
                 foreach my $unit_marker (@start_unit_markers) {
@@ -263,7 +268,10 @@ sub start_restart_stop_dbus {
                     my $marker = action_to_marker($unit_action);
                     # Quietly fallback to immediate execution if the above failed (e.g., because the systemd version is too old)
                     if (system('systemctl', '--quiet', @instance_args, 'set-property', $unit, "Markers=$marker") != 0) {
-                        system('systemctl', '--quiet', @instance_args, $unit_action, $unit) == 0 or die("Could not execute systemctl: $?");
+                        system('systemctl', '--quiet', @instance_args, $unit_action, $unit);
+                        die "Could not execute systemctl: $!\n" if $? == -1;
+                        die "systemctl died with signal " . ($? & 127) . "!\n" if $? & 127;
+                        die "systemctl returned status " . ($? >> 8) . "!\n" if $? >> 8;
                     }
                 }
             }
@@ -434,6 +442,8 @@ my $action = shift @units;
 if (-x $policyhelper) {
     foreach my $unit (@units) {
         system(qq|$policyhelper $unit "$action"|);
+        die "Could not execute $policyhelper: $!\n" if $? == -1;
+        die "$policyhelper died with signal " . ($? & 127) . "!\n" if $? & 127;
 
         # 0 or 104 means run
         # 101 means do not run
