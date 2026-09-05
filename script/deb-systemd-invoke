@@ -371,7 +371,7 @@ sub reload_reexec_signal {
     }
 
     if ($is_system) {
-        system('kill', '-s', $signal, '1');
+        kill($signal, 1);
     } else {
         system('systemctl', '--quiet', 'kill', '--kill-whom=main', '--signal', $signal, 'user@*.service');
     }
