@@ -58,6 +58,7 @@ B<enqueue-marked-jobs> will be a no-op.
 
 use strict;
 use warnings;
+use Config;
 use Getopt::Long; # in core since Perl 5
 use IO::Socket::UNIX; # in core since at least Perl 5.6.1-8.9
 
@@ -360,6 +361,12 @@ sub reload_reexec_dbus {
     return;
 }
 
+my $SIGRTMIN = 0;
+for my $name (split(' ', $Config{sig_name})) {
+    last if ($name eq "RTMIN");
+    $SIGRTMIN++;
+}
+
 sub reload_reexec_signal {
     my ($action) = @_;
     my $signal;
@@ -367,7 +374,8 @@ sub reload_reexec_signal {
     if ($action eq "daemon-reload") {
         $signal = 'SIGHUP';
     } else {
-        $signal = 'SIGRTMIN+25';
+        # Perl kill() does not recognize SIGRTMIN+n
+        $signal = $is_system ? ($SIGRTMIN + 25) : 'SIGRTMIN+25';
     }
 
     if ($is_system) {
